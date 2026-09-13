@@ -3,11 +3,13 @@ from pathlib import Path
 
 import cfpq_data
 import pydot
-from networkx import MultiDiGraph, nx_pydot
+from networkx import MultiDiGraph
 
 
 @dataclass
 class GraphInfo:
+    """Node and edge counts and unique edge labels of a graph."""
+
     num_nodes: int
     num_edges: int
     labels: set[str]
@@ -15,19 +17,20 @@ class GraphInfo:
 
 def load_graph(graph_name: str) -> MultiDiGraph:
     """
-    Load a graph from CFPQ_Data and return it
+    Load a graph from CFPQ_Data and return it.
 
     Args:
         graph_name: Name of the graph in the CFPQ_Data.
 
     Returns:
-        MultiDiGraph: Graph loaded via name from CFPQ_Data
+        MultiDiGraph: Graph loaded via name from CFPQ_Data.
+
+    Raises:
+        FileNotFoundError: The graph name is not in the CFPQ_Data dataset.
     """
 
     graph_path = cfpq_data.download(graph_name)
-    graph = cfpq_data.graph_from_csv(graph_path)
-
-    return graph
+    return cfpq_data.graph_from_csv(graph_path)
 
 
 def load_graph_info(graph_name: str) -> GraphInfo:
@@ -39,6 +42,9 @@ def load_graph_info(graph_name: str) -> GraphInfo:
 
     Returns:
         GraphInfo with node and edge counts and set of unique edge labels.
+
+    Raises:
+        FileNotFoundError: The graph name is not in the CFPQ_Data dataset.
     """
     graph = load_graph(graph_name)
 
@@ -49,7 +55,7 @@ def load_graph_info(graph_name: str) -> GraphInfo:
     )
 
 
-def create_labeled_two_cycles_graph(
+def create_two_cycles_graph(
     num_first_cycle_nodes: int,
     first_cycle_label: str,
     num_second_cycle_nodes: int,
@@ -100,7 +106,7 @@ def create_labeled_two_cycles_graph(
     return graph
 
 
-def save_labeled_two_cycles_graph(
+def save_two_cycles_graph(
     num_first_cycle_nodes: int,
     first_cycle_label: str,
     num_second_cycle_nodes: int,
@@ -126,17 +132,20 @@ def save_labeled_two_cycles_graph(
         ValueError: Negative cycle size.
     """
 
-    graph = create_labeled_two_cycles_graph(
+    graph = create_two_cycles_graph(
         num_first_cycle_nodes,
         first_cycle_label,
         num_second_cycle_nodes,
         second_cycle_label,
     )
 
-    for _, _, data in graph.edges(data=True):
-        # NetworkX rejects unquoted ":" in attribute values: https://github.com/pydot/pydot/issues/258
-        data["label"] = pydot.make_quoted(
-            data["label"].replace("\\", "\\\\")
-        )  # otherwise "...\\" leads to invalid DOT
+    dot_graph = pydot.Dot(graph_type="digraph", strict=False)
+    for node in graph.nodes:
+        dot_graph.add_node(pydot.Node(str(node)))
 
-    nx_pydot.write_dot(graph, output_path)
+    for source, target, data in graph.edges(data=True):
+        # make_quoted escapes quotes but leaves backslashes unchanged.
+        label = pydot.make_quoted(data["label"].replace("\\", "\\\\"))
+        dot_graph.add_edge(pydot.Edge(str(source), str(target), label=label))
+
+    dot_graph.write_raw(output_path, encoding="utf-8")
