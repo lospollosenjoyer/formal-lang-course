@@ -5,10 +5,20 @@ from random import Random
 import pytest
 from networkx import DiGraph, MultiDiGraph
 from networkx.utils import graphs_equal
-from pyformlang.cfg import CFG
+from pyformlang.cfg import CFG, Production, Terminal, Variable
 
 from project import graph_utils
-from project.cfpq import hellings_based_cfpq
+from project.cfpq import hellings_based_cfpq, matrix_based_cfpq
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(hellings_based_cfpq, id="hellings"),
+        pytest.param(matrix_based_cfpq, id="matrix"),
+    ]
+)
+def cfpq(request):
+    return request.param
 
 
 @pytest.fixture
@@ -43,61 +53,113 @@ def path_graph():
         pytest.param("S -> missing", None, None, set(), id="unknown-edge-label"),
     ],
 )
-def test_hellings_path_queries(path_graph, grammar, starts, finals, expected):
-    result = hellings_based_cfpq(CFG.from_text(grammar), path_graph, starts, finals)
+def test_cfpq_path_queries(cfpq, path_graph, grammar, starts, finals, expected):
+    result = cfpq(CFG.from_text(grammar), path_graph, starts, finals)
 
     assert result == expected, (grammar, starts, finals)
 
 
-def test_hellings_defaults_to_all_endpoint_pairs(path_graph):
-    assert hellings_based_cfpq(CFG.from_text("S -> a | b"), path_graph) == {
+def test_cfpq_defaults_to_all_endpoint_pairs(cfpq, path_graph):
+    assert cfpq(CFG.from_text("S -> a | b"), path_graph) == {
         (100, -7),
         (-7, 42),
     }
 
 
-def test_hellings_empty_graph():
-    assert hellings_based_cfpq(CFG.from_text("S -> $ | a"), MultiDiGraph()) == set()
+def test_cfpq_empty_graph(cfpq):
+    assert cfpq(CFG.from_text("S -> $ | a"), MultiDiGraph()) == set()
 
 
 @pytest.mark.parametrize("endpoint", ["start_nodes", "final_nodes"])
-def test_hellings_rejects_unknown_vertices(path_graph, endpoint):
+def test_cfpq_rejects_unknown_vertices(cfpq, path_graph, endpoint):
     with pytest.raises(ValueError):
-        hellings_based_cfpq(CFG.from_text("S -> $"), path_graph, **{endpoint: {1234}})
+        cfpq(CFG.from_text("S -> $"), path_graph, **{endpoint: {1234}})
 
 
-def test_hellings_supports_directed_simple_graph():
+@pytest.mark.parametrize("endpoint", ["start_nodes", "final_nodes"])
+def test_cfpq_rejects_unknown_vertices_in_empty_graph(cfpq, endpoint):
+    with pytest.raises(ValueError):
+        cfpq(CFG.from_text("S -> $"), MultiDiGraph(), **{endpoint: {1234}})
+
+
+def test_cfpq_supports_directed_simple_graph(cfpq):
     graph = DiGraph()
     graph.add_edge(10, 20, label="first")
     graph.add_edge(20, 30, label="second")
 
-    assert hellings_based_cfpq(CFG.from_text("S -> first second"), graph) == {(10, 30)}
+    assert cfpq(CFG.from_text("S -> first second"), graph) == {(10, 30)}
 
 
-def test_hellings_preserves_literal_epsilon_edge_label():
+@pytest.mark.parametrize("label", ["ɛ", "epsilon", "$"])
+def test_cfpq_preserves_literal_epsilon_edge_label(cfpq, label):
     graph = DiGraph()
-    graph.add_edge(10, 20, label="ɛ")
+    graph.add_edge(10, 20, label=label)
+    start = Variable("S")
+    cfg = CFG(start_symbol=start, productions=[Production(start, [Terminal(label)])])
 
-    assert hellings_based_cfpq(CFG.from_text("S -> ɛ"), graph) == {(10, 20)}
+    assert cfpq(cfg, graph) == {(10, 20)}
 
 
-def test_hellings_keeps_parallel_edge_labels():
+def test_cfpq_keeps_parallel_edge_labels(cfpq):
     graph = MultiDiGraph()
     graph.add_edge(10, 20, label="a")
     graph.add_edge(10, 20, label="b")
     graph.add_edge(20, 30, label="c")
     graph.add_edge(20, 40, label="d")
 
-    assert hellings_based_cfpq(CFG.from_text("S -> a c | b d"), graph) == {
+    assert cfpq(CFG.from_text("S -> a c | b d"), graph) == {
         (10, 30),
         (10, 40),
     }
 
 
-def test_hellings_uses_custom_start_symbol(path_graph):
+def test_cfpq_uses_custom_start_symbol(cfpq, path_graph):
     cfg = CFG.from_text("Root -> a b\nS -> a | $", start_symbol="Root")
 
-    assert hellings_based_cfpq(cfg, path_graph) == {(100, 42)}
+    assert cfpq(cfg, path_graph) == {(100, 42)}
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        pytest.param(CFG(), set(), id="no-start-symbol"),
+        pytest.param(
+            CFG(productions=[Production(Variable(None), [Terminal("a")])]),
+            set(),
+            id="none-valued-variable-is-not-an-implicit-start",
+        ),
+        pytest.param(
+            CFG(
+                start_symbol=Variable(None),
+                productions=[Production(Variable(None), [Terminal("a")])],
+            ),
+            {(100, -7)},
+            id="explicit-none-valued-start",
+        ),
+    ],
+)
+def test_cfpq_distinguishes_missing_and_none_valued_start(
+    cfpq, path_graph, cfg, expected
+):
+    assert cfpq(cfg, path_graph) == expected
+
+
+def test_cfpq_distinguishes_same_named_terminal_and_variable(cfpq):
+    start, variable = Variable("S"), Variable("X")
+    cfg = CFG(
+        start_symbol=start,
+        productions=[
+            Production(start, [variable, Terminal("a")]),
+            Production(start, [Terminal("X"), Terminal("a")]),
+            Production(variable, [Terminal("b")]),
+        ],
+    )
+    graph = DiGraph()
+    graph.add_edge(10, 20, label="X")
+    graph.add_edge(30, 20, label="b")
+    graph.add_edge(20, 40, label="a")
+
+    assert cfpq(cfg, graph) == {(10, 40), (30, 40)}
 
 
 @pytest.mark.parametrize(
@@ -117,12 +179,12 @@ def test_hellings_uses_custom_start_symbol(path_graph):
         ),
     ],
 )
-def test_hellings_joins_new_paths_on_both_sides(grammar, labels, expected):
+def test_cfpq_joins_new_paths_on_both_sides(cfpq, grammar, labels, expected):
     graph = MultiDiGraph()
     for index, label in enumerate(labels, start=1):
         graph.add_edge(10 * index, 10 * (index + 1), label=label)
 
-    assert hellings_based_cfpq(CFG.from_text(grammar), graph) == expected, (
+    assert cfpq(CFG.from_text(grammar), graph) == expected, (
         grammar,
         labels,
     )
@@ -147,28 +209,26 @@ def test_hellings_joins_new_paths_on_both_sides(grammar, labels, expected):
         ),
     ],
 )
-def test_hellings_composes_nullable_paths(path_graph, grammar, expected):
-    assert hellings_based_cfpq(CFG.from_text(grammar), path_graph) == expected
+def test_cfpq_composes_nullable_paths(cfpq, path_graph, grammar, expected):
+    assert cfpq(CFG.from_text(grammar), path_graph) == expected
 
 
-def test_hellings_balanced_query_requires_revisiting_vertices():
+def test_cfpq_balanced_query_requires_revisiting_vertices(cfpq):
     graph = MultiDiGraph()
     graph.add_edge(10, 20, label="a")
     graph.add_edge(20, 10, label="a")
     graph.add_edge(10, 30, label="b")
     graph.add_edge(30, 40, label="b")
 
-    assert hellings_based_cfpq(
-        CFG.from_text("S -> a S b | a b"), graph, {10}, {40}
-    ) == {(10, 40)}
+    assert cfpq(CFG.from_text("S -> a S b | a b"), graph, {10}, {40}) == {(10, 40)}
 
 
-def test_hellings_ambiguous_recursion_terminates_on_cycle():
+def test_cfpq_ambiguous_recursion_terminates_on_cycle(cfpq):
     graph = MultiDiGraph()
     graph.add_edge(10, 20, label="a")
     graph.add_edge(20, 10, label="a")
 
-    assert hellings_based_cfpq(CFG.from_text("S -> S S | a | $"), graph) == {
+    assert cfpq(CFG.from_text("S -> S S | a | $"), graph) == {
         (10, 10),
         (10, 20),
         (20, 10),
@@ -176,20 +236,20 @@ def test_hellings_ambiguous_recursion_terminates_on_cycle():
     }
 
 
-def test_hellings_does_not_modify_graph(path_graph):
+def test_cfpq_does_not_modify_graph(cfpq, path_graph):
     path_graph.nodes[100]["annotations"] = ["source"]
     before = deepcopy(path_graph)
 
-    hellings_based_cfpq(CFG.from_text("S -> a S b | $"), path_graph)
+    cfpq(CFG.from_text("S -> a S b | $"), path_graph)
 
     assert graphs_equal(path_graph, before)
 
 
-def test_hellings_does_not_modify_grammar(path_graph):
+def test_cfpq_does_not_modify_grammar(cfpq, path_graph):
     cfg = CFG.from_text("S -> A | a S b\nA -> $")
     before = deepcopy(cfg)
 
-    hellings_based_cfpq(cfg, path_graph)
+    cfpq(cfg, path_graph)
 
     assert cfg.start_symbol == before.start_symbol
     assert cfg.variables == before.variables
@@ -198,11 +258,11 @@ def test_hellings_does_not_modify_grammar(path_graph):
 
 
 @pytest.mark.parametrize("endpoint", ["start_nodes", "final_nodes"])
-def test_hellings_does_not_modify_endpoint_set(path_graph, endpoint):
+def test_cfpq_does_not_modify_endpoint_set(cfpq, path_graph, endpoint):
     endpoints = {"start_nodes": {100}, "final_nodes": {42}}
     before = endpoints[endpoint].copy()
 
-    hellings_based_cfpq(CFG.from_text("S -> a b"), path_graph, **endpoints)
+    cfpq(CFG.from_text("S -> a b"), path_graph, **endpoints)
 
     assert endpoints[endpoint] == before
 
@@ -224,7 +284,7 @@ def _balanced_paths_in_dag(graph, starts, finals):
 
 
 @pytest.mark.parametrize("seed", range(12))
-def test_hellings_matches_exhaustive_balanced_paths_on_generated_dags(seed):
+def test_cfpq_matches_exhaustive_balanced_paths_on_generated_dags(cfpq, seed):
     rng = Random(seed)
     nodes = [-10, 8, 42, 100, -3, 777, 9]
     graph = MultiDiGraph()
@@ -238,22 +298,44 @@ def test_hellings_matches_exhaustive_balanced_paths_on_generated_dags(seed):
     finals = {node for node in nodes if rng.random() < 0.5}
     expected = _balanced_paths_in_dag(graph, starts, finals)
 
-    actual = hellings_based_cfpq(CFG.from_text("S -> a S b | $"), graph, starts, finals)
+    actual = cfpq(CFG.from_text("S -> a S b | $"), graph, starts, finals)
 
     assert actual == expected, (seed, starts, finals, list(graph.edges(data="label")))
 
 
-def test_hellings_on_two_cycles():
+def test_cfpq_on_two_cycles(cfpq):
     graph = graph_utils.create_two_cycles_graph(2, "a", 2, "b")
 
-    assert hellings_based_cfpq(CFG.from_text("S -> a S b | a b"), graph, {0}, {0}) == {
-        (0, 0)
-    }
+    assert cfpq(CFG.from_text("S -> a S b | a b"), graph, {0}, {0}) == {(0, 0)}
 
 
-def test_hellings_on_loaded_graph(monkeypatch):
+def test_cfpq_on_loaded_graph(cfpq, monkeypatch):
     path = Path(__file__).parent / "data" / "graph_with_parallel_edges.csv"
     monkeypatch.setattr(graph_utils.cfpq_data, "download", lambda _: str(path))
     graph = graph_utils.load_graph("local-fixture")
 
-    assert hellings_based_cfpq(CFG.from_text("S -> a b"), graph) == {(0, 1), (0, 2)}
+    assert cfpq(CFG.from_text("S -> a b"), graph) == {(0, 1), (0, 2)}
+
+
+def test_cfpq_reaches_fixed_point_for_recursive_concatenation(cfpq):
+    graph = DiGraph()
+    for source in range(16):
+        graph.add_edge(source, source + 1, label="a")
+
+    result = cfpq(CFG.from_text("S -> S S | a"), graph)
+
+    assert result == {
+        (source, target)
+        for source in graph.nodes
+        for target in graph.nodes
+        if source < target
+    }
+
+
+def test_cfpq_uses_boolean_reachability_for_many_alternative_paths(cfpq):
+    graph = DiGraph()
+    for middle in range(1, 257):
+        graph.add_edge(0, middle, label="a")
+        graph.add_edge(middle, 257, label="b")
+
+    assert cfpq(CFG.from_text("S -> a b"), graph) == {(0, 257)}
