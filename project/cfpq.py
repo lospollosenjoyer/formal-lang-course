@@ -3,9 +3,10 @@ from collections import defaultdict, deque
 from networkx import DiGraph
 from pyformlang.cfg import CFG, Variable
 from pyformlang.finite_automaton import State, Symbol
+from pyformlang.rsa import RecursiveAutomaton
 from scipy.sparse import csr_matrix, eye
 
-from project.adjacency_matrix_fa import AdjacencyMatrixFA
+from project.adjacency_matrix_fa import AdjacencyMatrixFA, intersect_automata
 from project.automata_utils import graph_to_nfa
 from project.grammar_utils import cfg_to_weak_normal_form
 
@@ -161,6 +162,93 @@ def matrix_based_cfpq(
     starts = list(graph_fa.start_states)
     finals = list(graph_fa.final_states)
     reachable = reachable[starts][:, finals].tocoo()
+    return {
+        (graph_fa.states[starts[row]].value, graph_fa.states[finals[column]].value)
+        for row, column in zip(reachable.row, reachable.col)
+    }
+
+
+def tensor_based_cfpq(
+    rsm: RecursiveAutomaton,
+    graph: DiGraph,
+    start_nodes: set[int] | None = None,
+    final_nodes: set[int] | None = None,
+) -> set[tuple[int, int]]:
+    """
+    Find vertex pairs connected by a path in an RSM's language using tensor products.
+
+    Intersect the boxes reachable from the initial box with the graph and take
+    the reflexive closure of each product. Paths from a box's start to its final
+    states become graph transitions labeled by that box. When a box discovers
+    a new pair, revisit only the boxes that call it.
+
+    Args:
+        rsm: Query automaton whose box labels identify nonterminal calls.
+        graph: Directed graph or multigraph with edge symbols in the label attribute.
+        start_nodes: Initial vertices. None or an empty set means all vertices.
+        final_nodes: Accepting vertices. None or an empty set independently means all.
+
+    Returns:
+        set[tuple[int, int]]: Matching pairs of original graph vertex identifiers,
+            including zero-length paths when the RSM generates the empty word.
+
+    Raises:
+        ValueError: A specified initial or accepting vertex is absent from the graph.
+    """
+    graph_fa = AdjacencyMatrixFA(
+        graph_to_nfa(
+            graph,
+            set(start_nodes) if start_nodes is not None else set(),
+            set(final_nodes) if final_nodes is not None else set(),
+        )
+    )
+    initial_label = rsm.initial_label
+    rsm_boxes = rsm.boxes
+    if not graph_fa.start_states or initial_label not in rsm_boxes:
+        return set()
+
+    boxes = {}
+    callers = defaultdict(set)
+    pending = {initial_label}
+    while pending:
+        label = pending.pop()
+        box = AdjacencyMatrixFA(rsm_boxes[label].dfa)
+        boxes[label] = box
+        calls = box.matrices.keys() & rsm_boxes.keys()
+        for callee in calls:
+            callers[callee].add(label)
+        pending.update(calls - boxes.keys())
+
+    size = graph_fa.num_states
+    empty_relation = csr_matrix((size, size), dtype=bool)
+    for label in boxes:
+        graph_fa.matrices[label] = empty_relation
+
+    queue = deque(reversed(boxes))
+    queued = set(boxes)
+    while queue:
+        label = queue.popleft()
+        queued.remove(label)
+        box = boxes[label]
+        if not box.start_states or not box.final_states:
+            continue
+        closure = intersect_automata(box, graph_fa).transitive_closure()
+        relation = graph_fa.matrices[label]
+        expanded = relation
+        for start in box.start_states:
+            rows = slice(start * size, (start + 1) * size)
+            for final in box.final_states:
+                columns = slice(final * size, (final + 1) * size)
+                expanded = expanded + closure[rows, columns]
+        if expanded.nnz > relation.nnz:
+            graph_fa.matrices[label] = expanded
+            for caller in callers[label] - queued:
+                queue.append(caller)
+                queued.add(caller)
+
+    starts = list(graph_fa.start_states)
+    finals = list(graph_fa.final_states)
+    reachable = graph_fa.matrices[initial_label][starts][:, finals].tocoo()
     return {
         (graph_fa.states[starts[row]].value, graph_fa.states[finals[column]].value)
         for row, column in zip(reachable.row, reachable.col)

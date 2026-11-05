@@ -6,9 +6,14 @@ import pytest
 from networkx import DiGraph, MultiDiGraph
 from networkx.utils import graphs_equal
 from pyformlang.cfg import CFG, Production, Terminal, Variable
+from pyformlang.finite_automaton import Symbol
+from pyformlang.rsa import RecursiveAutomaton
 
+from project import cfpq as cfpq_module
 from project import graph_utils
-from project.cfpq import hellings_based_cfpq, matrix_based_cfpq
+from project.adjacency_matrix_fa import AdjacencyMatrixFA
+from project.cfpq import hellings_based_cfpq, matrix_based_cfpq, tensor_based_cfpq
+from project.grammar_utils import ebnf_to_rsm
 
 
 @pytest.fixture(
@@ -339,3 +344,112 @@ def test_cfpq_uses_boolean_reachability_for_many_alternative_paths(cfpq):
         graph.add_edge(middle, 257, label="b")
 
     assert cfpq(CFG.from_text("S -> a b"), graph) == {(0, 257)}
+
+
+def test_tensor_cfpq_does_not_use_graph_edges_as_box_calls():
+    rsm = RecursiveAutomaton.from_text("S -> A\nA -> a")
+    graph = DiGraph()
+    graph.add_edge(10, 20, label="A")
+    graph.add_edge(30, 20, label="a")
+
+    assert tensor_based_cfpq(rsm, graph) == {(30, 20)}
+
+
+def test_tensor_cfpq_reaches_fixed_point_for_mutually_recursive_boxes():
+    rsm = RecursiveAutomaton.from_text("S -> a A b | a b\nA -> a S b")
+    graph = DiGraph()
+    for source, label in enumerate("aaabbb"):
+        graph.add_edge(source, source + 1, label=label)
+
+    assert tensor_based_cfpq(rsm, graph) == {(0, 6), (2, 4)}
+
+
+def test_tensor_cfpq_does_not_apply_query_endpoint_filters_to_box_calls():
+    rsm = RecursiveAutomaton.from_text("S -> a A b\nA -> c")
+    graph = DiGraph()
+    graph.add_edge(10, 20, label="a")
+    graph.add_edge(20, 30, label="c")
+    graph.add_edge(30, 40, label="b")
+
+    assert tensor_based_cfpq(rsm, graph, {10}, {40}) == {(10, 40)}
+
+
+def test_tensor_cfpq_uses_nullable_box_within_a_path(path_graph):
+    rsm = RecursiveAutomaton.from_text("S -> a A b\nA -> $")
+
+    assert tensor_based_cfpq(rsm, path_graph) == {(100, 42)}
+
+
+def test_tensor_cfpq_collects_paths_to_all_final_box_states(path_graph):
+    rsm = RecursiveAutomaton.from_text("S -> a | a b")
+
+    assert tensor_based_cfpq(rsm, path_graph) == {(100, -7), (100, 42)}
+
+
+def test_tensor_cfpq_returns_pairs_for_the_selected_initial_box(path_graph):
+    rsm = RecursiveAutomaton.from_text("S -> b\nRoot -> a", start_symbol="Root")
+
+    assert tensor_based_cfpq(rsm, path_graph) == {(100, -7)}
+
+
+def test_tensor_cfpq_returns_no_pairs_without_an_initial_box(path_graph):
+    assert tensor_based_cfpq(RecursiveAutomaton(), path_graph) == set()
+
+
+def test_tensor_cfpq_skips_unreachable_boxes(path_graph, monkeypatch):
+    rsm = RecursiveAutomaton.from_text("S -> A\nA -> a\nDead -> b*")
+    intersect = cfpq_module.intersect_automata
+
+    def intersect_reachable_box(box, graph):
+        assert Symbol("b") not in box.matrices
+        return intersect(box, graph)
+
+    monkeypatch.setattr(cfpq_module, "intersect_automata", intersect_reachable_box)
+
+    assert tensor_based_cfpq(rsm, path_graph) == {(100, -7)}
+
+
+def test_tensor_cfpq_uses_linear_number_of_closures_on_a_box_chain(monkeypatch):
+    labels = ["S"] + [f"B{index}" for index in range(1, 200)]
+    rules = [f"{caller} -> {callee}" for caller, callee in zip(labels, labels[1:])]
+    rules.append(f"{labels[-1]} -> a")
+    rsm = RecursiveAutomaton.from_text("\n".join(rules))
+    graph = DiGraph()
+    graph.add_edge(0, 1, label="a")
+    closure_count = 0
+    transitive_closure = AdjacencyMatrixFA.transitive_closure
+
+    def count_closure(automaton):
+        nonlocal closure_count
+        closure_count += 1
+        return transitive_closure(automaton)
+
+    monkeypatch.setattr(AdjacencyMatrixFA, "transitive_closure", count_closure)
+
+    assert tensor_based_cfpq(rsm, graph) == {(0, 1)}
+    assert closure_count <= 2 * len(labels)
+
+
+def test_tensor_cfpq_ebnf_matches_escaped_dot_without_the_backslash():
+    rsm = ebnf_to_rsm(r"S -> a\.b")
+    graph = DiGraph()
+    graph.add_edge(0, 1, label="a.b")
+    graph.add_edge(0, 2, label=r"a\.b")
+    graph.add_edge(0, 3, label="a")
+    graph.add_edge(3, 4, label="b")
+
+    assert tensor_based_cfpq(rsm, graph) == {(0, 1)}
+
+
+def test_tensor_cfpq_from_recursive_ebnf_with_epsilon_and_endpoint_filters():
+    rsm = ebnf_to_rsm("S -> enter Frame leave | $\nFrame -> S")
+    graph = DiGraph()
+    graph.add_edges_from([(-8, 13), (13, 5)], label="enter")
+    graph.add_edges_from([(5, 31), (31, 77), (31, -23)], label="leave")
+    graph.add_edge(31, 107, label="enter")
+    graph.add_node(90)
+
+    assert tensor_based_cfpq(rsm, graph, {-8, 90}, {31, 77, 90, 107}) == {
+        (-8, 77),
+        (90, 90),
+    }
