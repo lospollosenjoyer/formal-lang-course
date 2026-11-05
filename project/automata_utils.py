@@ -2,6 +2,7 @@ from networkx import MultiDiGraph
 from pyformlang.finite_automaton import (
     DeterministicFiniteAutomaton,
     NondeterministicFiniteAutomaton,
+    Symbol,
 )
 from pyformlang.regular_expression import Regex
 
@@ -24,7 +25,7 @@ def graph_to_nfa(
     graph: MultiDiGraph, start_states: set[int], final_states: set[int]
 ) -> NondeterministicFiniteAutomaton:
     """
-    Convert graph vertices to NFA states and labeled edges to transitions.
+    Convert graph vertices to NFA states and edge labels to literal symbols.
 
     Args:
         graph: Directed multigraph with edge symbols in the label attribute.
@@ -52,6 +53,8 @@ def graph_to_nfa(
             nfa.add_final_state(vertex)
 
         for source, target, data in graph.out_edges(vertex, data=True):
-            nfa.add_transition(source, data["label"], target)
+            label = data["label"]
+            symbol = label if isinstance(label, Symbol) else Symbol(label)
+            nfa.add_transition(source, symbol, target)
 
     return nfa
