@@ -128,7 +128,7 @@ def cfg_to_rsm(cfg: CFG) -> RecursiveAutomaton:
 
     start_box = Box(automata.pop(start), labels[start])
     rsm = RecursiveAutomaton(initial_label=start_box.label, boxes={start_box})
-    
+
     for variable, automaton in automata.items():
         rsm.add_box(Box(automaton, labels[variable]))
     return rsm
@@ -156,7 +156,7 @@ def _encode_ebnf_body(body: str, tokens: dict[str, str]) -> str:
     trimmed = body.rstrip()
     if not trimmed:
         return "epsilon"
-    
+
     escaped_tail = (len(trimmed) - len(trimmed.rstrip("\\"))) % 2
     body = body[: len(trimmed) + escaped_tail]
 
