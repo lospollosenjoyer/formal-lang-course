@@ -2,9 +2,10 @@ from copy import deepcopy
 from itertools import product
 
 import pytest
-from pyformlang.cfg import CFG, Production, Terminal, Variable
+from pyformlang.cfg import CFG, Epsilon, Production, Terminal, Variable
+from pyformlang.finite_automaton import Symbol
 
-from project.grammar_utils import cfg_to_weak_normal_form
+from project.grammar_utils import cfg_to_rsm, cfg_to_weak_normal_form, ebnf_to_rsm
 
 
 def _words(alphabet, max_length):
@@ -243,3 +244,160 @@ def test_weak_normal_form_preserves_explicit_start_with_none_value():
     assert result.start_symbol is start
     assert result.contains(["a"])
     assert not result.contains([])
+
+
+def test_cfg_to_rsm_keeps_boxes_with_colliding_label_hashes():
+    start, other = Variable(-1), Variable(-2)
+    cfg = CFG(
+        start_symbol=start,
+        productions=[
+            Production(variable, [Terminal(value)])
+            for variable in (start, other)
+            for value in ("a", 0)
+        ],
+    )
+
+    result = cfg_to_rsm(cfg)
+
+    assert set(result.boxes) == {Symbol(-1), Symbol(-2)}
+
+
+def test_cfg_to_rsm_renames_calls_without_shadowing_terminals_or_boxes():
+    start, call, existing = Variable("S"), Variable("A"), Variable("RSM_1")
+    cfg = CFG(
+        start_symbol=start,
+        productions=[
+            Production(start, [call, Terminal("b")]),
+            Production(start, [Terminal("A")]),
+            Production(start, [Terminal("RSM_0")]),
+            Production(call, [Terminal("a")]),
+            Production(existing, [Terminal("c")]),
+        ],
+    )
+
+    result = cfg_to_rsm(cfg)
+
+    (call_label,) = set(result.boxes) - {Symbol("S"), Symbol("RSM_1")}
+    assert Symbol("RSM_1") in result.boxes
+    assert call_label not in {Symbol("A"), Symbol("RSM_0")}
+    assert result.get_box(call_label).dfa.accepts(("a",))
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert all(
+        start_dfa.accepts(word) for word in ((call_label, "b"), ("A",), ("RSM_0",))
+    )
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [
+        pytest.param(Epsilon(), ("a", "b"), id="explicit-epsilon"),
+        pytest.param(
+            Terminal("epsilon"), ("a", Symbol("epsilon"), "b"), id="literal-epsilon"
+        ),
+    ],
+)
+def test_cfg_to_rsm_distinguishes_epsilon_from_literal(symbol, expected):
+    start = Variable("S")
+    cfg = CFG(
+        start_symbol=start,
+        productions=[
+            Production(start, [Terminal("a"), symbol, Terminal("b")], filtering=False)
+        ],
+    )
+
+    result = cfg_to_rsm(cfg)
+
+    start_dfa = result.get_box(result.initial_label).dfa
+    words = [("a", "b"), ("a", Symbol("epsilon"), "b")]
+    assert {word for word in words if start_dfa.accepts(word)} == {expected}
+
+
+def test_cfg_to_rsm_does_not_infer_start_from_none_valued_variable():
+    cfg = CFG(productions=[Production(Variable(None), [Terminal("a")])])
+
+    assert not cfg_to_rsm(cfg).boxes
+
+
+def test_cfg_to_rsm_preserves_explicit_none_valued_start():
+    start = Variable(None)
+    cfg = CFG(start_symbol=start, productions=[Production(start, [Terminal("a")])])
+
+    assert cfg_to_rsm(cfg).initial_label == Symbol(None)
+
+
+@pytest.mark.parametrize(
+    ("grammar", "start"),
+    [
+        pytest.param("Root -> a\nS -> b", "S", id="late-s"),
+        pytest.param("Root -> a\nOther -> b", "Root", id="first-head"),
+    ],
+)
+def test_ebnf_to_rsm_selects_initial_box(grammar, start):
+    assert ebnf_to_rsm(grammar).initial_label == Symbol(start)
+
+
+def test_ebnf_to_rsm_empty_body_accepts_epsilon():
+    result = ebnf_to_rsm("S ->   ")
+
+    assert result.get_box(result.initial_label).dfa.accepts(())
+
+
+def test_ebnf_to_rsm_without_rules_has_no_boxes():
+    assert not ebnf_to_rsm("\n\t\n").boxes
+
+
+def test_ebnf_to_rsm_combines_repeated_heads_as_alternatives():
+    result = ebnf_to_rsm("S -> a\nS -> b")
+
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert {word for word in _words("ab", 2) if start_dfa.accepts(word)} == {
+        ("a",),
+        ("b",),
+    }
+
+
+def test_ebnf_to_rsm_preserves_calls_to_other_boxes():
+    result = ebnf_to_rsm("S -> a A b\nA -> c")
+
+    called_box = result.get_box(Symbol("A"))
+    assert called_box is not None
+    assert called_box.dfa.accepts(("c",))
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert start_dfa.accepts(("a", called_box.label, "b"))
+
+
+def test_ebnf_to_rsm_accepts_200_alternatives_for_one_head():
+    symbols = tuple(f"a{index}" for index in range(200))
+    result = ebnf_to_rsm("\n".join(f"S -> {symbol}" for symbol in symbols))
+
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert all(start_dfa.accepts((symbol,)) for symbol in symbols)
+    assert not start_dfa.accepts(())
+    assert not start_dfa.accepts((symbols[0], symbols[-1]))
+
+
+def test_ebnf_to_rsm_accepts_200_symbols_in_one_body():
+    word = tuple(f"a{index}" for index in range(200))
+    result = ebnf_to_rsm("S -> " + " ".join(word))
+
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert start_dfa.accepts(word)
+    assert not start_dfa.accepts(word[:-1])
+    assert not start_dfa.accepts(word[::-1])
+
+
+def test_ebnf_to_rsm_preserves_a_tab_inside_a_literal_label():
+    result = ebnf_to_rsm("S -> a\tb")
+
+    start_dfa = result.get_box(result.initial_label).dfa
+    assert start_dfa.accepts(("a\tb",))
+    assert not start_dfa.accepts(("a", "b"))
+
+
+@pytest.mark.parametrize(
+    "invalid_line",
+    ["A a", "-> a", "A -> )", "A -> (a", "A -> a |", "A -> a\\"],
+)
+def test_ebnf_to_rsm_rejects_malformed_nonblank_rules(invalid_line):
+    with pytest.raises(ValueError, match=r"(?i)line 2\b"):
+        ebnf_to_rsm(f"S -> a\n{invalid_line}\nA -> b")
