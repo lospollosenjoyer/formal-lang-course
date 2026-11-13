@@ -1,6 +1,6 @@
 import pytest
 from networkx import MultiDiGraph
-from pyformlang.finite_automaton import State
+from pyformlang.finite_automaton import State, Symbol
 
 from project.automata_utils import graph_to_nfa, regex_to_dfa
 
@@ -145,6 +145,17 @@ def test_graph_to_nfa_preserves_multicharacter_label():
     nfa = graph_to_nfa(graph, {10}, {20})
 
     assert nfa.accepts(["label"])
+
+
+@pytest.mark.parametrize("label", ["ɛ", "epsilon"])
+def test_graph_to_nfa_preserves_literal_epsilon_labels(label):
+    graph = MultiDiGraph()
+    graph.add_edge(10, 20, label=label)
+
+    nfa = graph_to_nfa(graph, {10}, {20})
+
+    assert nfa.accepts([Symbol(label)]), label
+    assert not nfa.accepts([]), label
 
 
 @pytest.mark.parametrize(
